@@ -1,0 +1,1 @@
+Visit https://narkkil.github.io/htb-writeups/ for a rendered view of the writeups.
